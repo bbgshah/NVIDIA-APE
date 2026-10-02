@@ -13,7 +13,7 @@
 * *Reverb*
 
 **This Application offload the Audio Processing workloads directly to your NVIDIA GPUs' CUDA / Tensor Cores using CUDA / TensorRT Frameworks.**
-**With that being said, this Application only works on NVIDIA Geforce GTX / RTX Series Cards, although some TensorRT exclusive features may be unavailable on GeForce GTX cards.**
+**With that being said, this Application only works on NVIDIA GeForce GTX / RTX Series Cards, although some TensorRT exclusive features may be unavailable on GeForce GTX cards.**
 
 
 *"This project is an independent open-source tool and is not affiliated, endorsed, or sponsored by NVIDIA Corporation. NVIDIA and its logos are registered trademarks of NVIDIA Corporation."*
