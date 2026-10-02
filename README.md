@@ -1,4 +1,3 @@
-# NVIDIA-APE
 NVIDIA Audio Processing Engine
 
 *Built using C++ and Cuda.*
