@@ -1,8 +1,9 @@
 # NVIDIA-APE
 NVIDIA Audio Processing Engine
+
 *Built using C++ and Cuda.*
 
-<img width="2500" height="1653" alt="cdnlogo com_nvidia-logo" src="https://github.com/user-attachments/assets/80090683-4229-42a4-be46-988aeb564889" />
+<img width="256" height="192" alt="cdnlogo com_nvidia-logo" src="https://github.com/user-attachments/assets/80090683-4229-42a4-be46-988aeb564889" />
 
 **This app is built for applying Audio Proccessing Effects to your Microphone using NVIDIA GeForce GPU's.**
 
