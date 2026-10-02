@@ -12,7 +12,7 @@ NVIDIA Audio Processing Engine
 * *Soft Saturation (Tanh wave-shaper)*
 * *Reverb*
 
-**This Application offload the Audio Processing workloads directly to your NVIDIA GPU's CUDA / Tensor Cores using CUDA / TensorRT Frameworks.**
+**This Application offload the Audio Processing workloads directly to your NVIDIA GPUs' CUDA / Tensor Cores using CUDA / TensorRT Frameworks.**
 
 
 *"This project is an independent open-source tool and is not affiliated, endorsed, or sponsored by NVIDIA Corporation. NVIDIA and its logos are registered trademarks of NVIDIA Corporation."*
