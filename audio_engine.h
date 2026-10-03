@@ -32,6 +32,7 @@ extern "C" {
 
     bool gpuEngineInit();            // allocs device memory, uploads filters
     void gpuEngineShutdown();
+    float gpuTakeKernelAvgMs();      // avg kernel-only time since last call (CUDA events)
     int  gpuHistoryLength();         // samples of history the caller must supply
 
     // hostIn  : gpuHistoryLength() + blockSize floats  [history | new block]

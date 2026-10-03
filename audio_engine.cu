@@ -26,6 +26,8 @@ static float*       d_in  = nullptr;
 static float*       d_out = nullptr;
 static float*       d_ir  = nullptr;
 static cudaStream_t g_stream = nullptr;
+static cudaEvent_t  g_evA = nullptr, g_evB = nullptr;
+static double g_kSum = 0.0; static long g_kN = 0;
 
 extern "C" bool verifyNvidiaGPU(char* gpuNameOut, int maxLen) {
     int deviceCount = 0;
@@ -43,40 +45,51 @@ extern "C" bool verifyNvidiaGPU(char* gpuNameOut, int maxLen) {
 }
 
 // ---------------------------------------------------------------------------
-// One thread per output sample. Each thread reads its own window of past input,
-// so there is no sequential dependency -> perfectly parallel (FIR, not IIR).
+// One CUDA block per output sample; its 128 threads split the filter taps
+// (strided, coalesced reads) and combine partial sums with warp shuffles.
+// Far shorter kernel time than one-thread-per-sample serial loops.
 // ---------------------------------------------------------------------------
+#define KTHREADS 128
+
+__device__ __forceinline__ float warpSum(float v) {
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+    return v;
+}
+
 __global__ void DspKernel(const float* in, const float* ir, float* out, int n, DspParams p) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-
+    const int i = blockIdx.x, t = threadIdx.x;
     const float* x = in + HISTORY + i;      // x[-k] = k samples ago
-    float dry = x[-FIR_DELAY];              // dry path delayed to match the FIRs
-    float y = dry;
 
+    float lp1 = 0.f, lp2 = 0.f, wet = 0.f;
     if (p.eq) {
-        float lp1 = 0.f, lp2 = 0.f;
-        for (int k = 0; k < FIR_TAPS; ++k) {
+        for (int k = t; k < FIR_TAPS; k += KTHREADS) {
             float v = x[-k];
             lp1 += c_lowLP[k] * v;
             lp2 += c_midLP[k] * v;
         }
-        // low = lp1, mid = lp2-lp1, high = dry-lp2  (sum == dry when gains are 1)
-        y = p.gLow * lp1 + p.gMid * (lp2 - lp1) + p.gHigh * (dry - lp2);
     }
-
-    // noise gate gain, linearly ramped across the block
-    float t = ((float)i + 0.5f) / (float)n;
-    y *= p.gate0 + (p.gate1 - p.gate0) * t;
-
     if (p.rev) {
-        float wet = 0.f;
-        for (int k = 0; k < REVERB_LEN; ++k) wet += ir[k] * x[-k];
-        y += p.mix * wet;
+        for (int k = t; k < REVERB_LEN; k += KTHREADS) wet += ir[k] * x[-k];
     }
 
-    if (p.sat) y = tanhf(y * p.drive) * p.satNorm;
+    lp1 = warpSum(lp1); lp2 = warpSum(lp2); wet = warpSum(wet);
+    __shared__ float sh[3][KTHREADS / 32];
+    if ((t & 31) == 0) { sh[0][t >> 5] = lp1; sh[1][t >> 5] = lp2; sh[2][t >> 5] = wet; }
+    __syncthreads();
+    if (t != 0) return;
 
+    lp1 = lp2 = wet = 0.f;
+    for (int w = 0; w < KTHREADS / 32; ++w) { lp1 += sh[0][w]; lp2 += sh[1][w]; wet += sh[2][w]; }
+
+    float dry = x[-FIR_DELAY];              // dry path delayed to match the FIRs
+    float y = dry;
+    if (p.eq) y = p.gLow * lp1 + p.gMid * (lp2 - lp1) + p.gHigh * (dry - lp2);
+
+    float tt = ((float)i + 0.5f) / (float)n;            // gate gain ramp
+    y *= p.gate0 + (p.gate1 - p.gate0) * tt;
+
+    if (p.rev) y += p.mix * wet;
+    if (p.sat) y = tanhf(y * p.drive) * p.satNorm;
     out[i] = y * p.outGain;
 }
 
@@ -94,6 +107,7 @@ static void designLowpass(float* h, double fc) {
 
 extern "C" bool gpuEngineInit() {
     if (d_in) return true;
+    cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);   // don't spin the CPU while waiting
 
     float lp1[FIR_TAPS], lp2[FIR_TAPS];
     designLowpass(lp1, 250.0);
@@ -119,6 +133,7 @@ extern "C" bool gpuEngineInit() {
     if (cudaMalloc((void**)&d_ir,  REVERB_LEN * sizeof(float)) != cudaSuccess) return false;
     cudaMemset(d_in, 0, (HISTORY + MAX_BLOCK) * sizeof(float));
     cudaMemcpy(d_ir, ir, sizeof(ir), cudaMemcpyHostToDevice);
+    cudaEventCreate(&g_evA); cudaEventCreate(&g_evB);
     return cudaStreamCreate(&g_stream) == cudaSuccess;
 }
 
@@ -127,6 +142,11 @@ extern "C" void gpuEngineShutdown() {
     if (d_in)  { cudaFree(d_in);  d_in  = nullptr; }
     if (d_out) { cudaFree(d_out); d_out = nullptr; }
     if (d_ir)  { cudaFree(d_ir);  d_ir  = nullptr; }
+}
+
+extern "C" float gpuTakeKernelAvgMs() {
+    float r = g_kN ? (float)(g_kSum / g_kN) : 0.f;
+    g_kSum = 0.0; g_kN = 0; return r;
 }
 
 extern "C" int gpuHistoryLength() { return HISTORY; }
@@ -152,8 +172,12 @@ extern "C" bool gpuProcessBlock(const float* hostIn, float* hostOut, int n,
     p.outGain = dbToLin(s->outputGainDb);
 
     cudaMemcpyAsync(d_in, hostIn, (HISTORY + n) * sizeof(float), cudaMemcpyHostToDevice, g_stream);
-    int threads = 256, blocks = (n + threads - 1) / threads;
-    DspKernel<<<blocks, threads, 0, g_stream>>>(d_in, d_ir, d_out, n, p);
+    cudaEventRecord(g_evA, g_stream);
+    DspKernel<<<n, KTHREADS, 0, g_stream>>>(d_in, d_ir, d_out, n, p);
+    cudaEventRecord(g_evB, g_stream);
     cudaMemcpyAsync(hostOut, d_out, n * sizeof(float), cudaMemcpyDeviceToHost, g_stream);
-    return cudaStreamSynchronize(g_stream) == cudaSuccess;
+    bool ok = cudaStreamSynchronize(g_stream) == cudaSuccess;
+    float ms = 0.f;
+    if (ok && cudaEventElapsedTime(&ms, g_evA, g_evB) == cudaSuccess) { g_kSum += ms; ++g_kN; }
+    return ok;
 }
